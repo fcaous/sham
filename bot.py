@@ -604,46 +604,28 @@ async def help_command(
 # ============================================================
 
 @bot.event
-async def on_ready() -> None:
+async def on_ready():
     print("=" * 60)
     print(f"Logged in as: {bot.user} ({bot.user.id})")
+    print("=" * 60)
 
+
+async def sync_commands():
     try:
         synced = await bot.tree.sync()
 
-        print(
-            f"Application commands synced: {len(synced)}"
-        )
+        print(f"Application commands synced: {len(synced)}")
 
-        print(
-            "Commands: "
-            + ", ".join(
-                f"/{command.name}"
-                for command in synced
-            )
-        )
+        for command in synced:
+            print(f"  /{command.name}")
 
     except Exception as exc:
-        print(
-            "COMMAND SYNC FAILED:",
-            repr(exc),
-        )
-
-        print(
-            "Check that the Discord application has "
-            "the applications.commands scope."
-        )
-
-    print("=" * 60)
+        print("COMMAND SYNC FAILED:", repr(exc))
 
 
 @bot.event
-async def on_disconnect() -> None:
-    print(
-        "Discord disconnected. "
-        "discord.py will attempt to reconnect."
-    )
-
+async def setup_hook():
+    await sync_commands()
 
 # ============================================================
 # START
