@@ -94,7 +94,6 @@ def set_wallet(user_id: int, coin: str, address: str):
         supabase.table("wallets").insert(payload).execute()
 
 # ---------- Bot ----------
-intents = discord.Intents.default()
 bot = commands.Bot(command_prefix="!", intents=intents)
 
 class WalletModal(discord.ui.Modal):
