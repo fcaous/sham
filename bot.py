@@ -106,6 +106,22 @@ bot = commands.Bot(
     intents=intents,
 )
 
+bot = commands.Bot(
+    command_prefix="!",
+    intents=intents,
+)
+
+bot.tree.allowed_contexts = app_commands.AppCommandContext(
+    guild=True,
+    dm_channel=True,
+    private_channel=True,
+)
+
+bot.tree.allowed_installs = app_commands.AppInstallationType(
+    guild=True,
+    user=True,
+)
+
 
 # ============================================================
 # SUPABASE
