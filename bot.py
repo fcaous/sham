@@ -2,9 +2,10 @@ import os
 import ast
 import operator as op
 import re
+import threading
 from datetime import datetime, timezone
-from typing import Optional
 
+from flask import Flask
 import discord
 from discord import app_commands
 from discord.ext import commands
@@ -28,16 +29,15 @@ UPI_IMAGE_URL = os.getenv(
     "?ex=6ab8d53f&is=6ab783bf&hm=0c2bdffd612a1fb72cb62393465329c41c19583847c5c2d3f4b67f6876c58948&=&format=webp",
 )
 
-missing = []
-
-if not DISCORD_TOKEN:
-    missing.append("DISCORD_TOKEN")
-
-if not SUPABASE_URL:
-    missing.append("SUPABASE_URL")
-
-if not SUPABASE_KEY:
-    missing.append("SUPABASE_KEY")
+missing = [
+    name
+    for name, value in {
+        "DISCORD_TOKEN": DISCORD_TOKEN,
+        "SUPABASE_URL": SUPABASE_URL,
+        "SUPABASE_KEY": SUPABASE_KEY,
+    }.items()
+    if not value
+]
 
 if missing:
     raise RuntimeError(
@@ -58,7 +58,38 @@ except Exception as exc:
 
 
 # ============================================================
-# COINS / WALLETS
+# RENDER WEB SERVICE HEALTH SERVER
+# ============================================================
+
+# Render Web Services expect the process to listen on PORT.
+# This tiny Flask server exists only to satisfy that requirement.
+# The Discord bot still does all of the actual work.
+
+web_app = Flask(__name__)
+
+
+@web_app.get("/")
+def home():
+    return "Discord bot is online!", 200
+
+
+@web_app.get("/health")
+def health():
+    return "OK", 200
+
+
+def run_web_server():
+    port = int(os.getenv("PORT", "10000"))
+
+    web_app.run(
+        host="0.0.0.0",
+        port=port,
+        use_reloader=False,
+    )
+
+
+# ============================================================
+# COINS
 # ============================================================
 
 COINS = {
@@ -126,7 +157,6 @@ def safe_calculate(expression: str):
         ):
             if abs(node.value) > 10**100:
                 raise ValueError("Number is too large.")
-
             return node.value
 
         if isinstance(node, ast.BinOp) and type(node.op) in BINARY_OPERATORS:
@@ -137,10 +167,7 @@ def safe_calculate(expression: str):
                 raise ValueError("Exponent is too large.")
 
             try:
-                result = BINARY_OPERATORS[type(node.op)](
-                    left,
-                    right,
-                )
+                result = BINARY_OPERATORS[type(node.op)](left, right)
             except ZeroDivisionError:
                 raise ValueError("You can't divide by zero.")
 
@@ -154,9 +181,7 @@ def safe_calculate(expression: str):
                 evaluate(node.operand)
             )
 
-        raise ValueError(
-            "Only basic arithmetic is supported."
-        )
+        raise ValueError("Only basic arithmetic is supported.")
 
     return evaluate(tree)
 
@@ -178,18 +203,11 @@ def get_wallets(user_id: int) -> dict:
     if result.data:
         return result.data[0]
 
-    return {
-        "user_id": str(user_id)
-    }
+    return {"user_id": str(user_id)}
 
 
-def save_wallet(
-    user_id: int,
-    coin: str,
-    address: str,
-) -> None:
+def save_wallet(user_id: int, coin: str, address: str) -> None:
     now = datetime.now(timezone.utc).isoformat()
-
     existing = get_wallets(user_id)
 
     if "id" in existing:
@@ -203,7 +221,6 @@ def save_wallet(
             .eq("user_id", str(user_id))
             .execute()
         )
-
     else:
         (
             supabase
@@ -218,7 +235,7 @@ def save_wallet(
 
 
 # ============================================================
-# DISCORD BOT
+# DISCORD
 # ============================================================
 
 intents = discord.Intents.default()
@@ -235,10 +252,7 @@ bot = commands.Bot(
 
 class WalletModal(discord.ui.Modal):
     def __init__(self, coin: str):
-        super().__init__(
-            title=f"Configure {COINS[coin]}"
-        )
-
+        super().__init__(title=f"Configure {COINS[coin]}")
         self.coin = coin
 
         self.address_input = discord.ui.TextInput(
@@ -266,18 +280,14 @@ class WalletModal(discord.ui.Modal):
 
             await interaction.response.send_message(
                 f"✅ Your **{COINS[self.coin]}** address has been saved.",
-                ephemeral=True,
+                ephemeral=False,
             )
 
         except Exception as exc:
-            print(
-                "Supabase save error:",
-                repr(exc),
-            )
+            print("Supabase save error:", repr(exc))
 
             await interaction.response.send_message(
-                "❌ I couldn't save your address. "
-                "Check your Supabase table and environment variables.",
+                "❌ I couldn't save your address. Check your Supabase table and key.",
                 ephemeral=True,
             )
 
@@ -289,7 +299,6 @@ class WalletModal(discord.ui.Modal):
 class ConfigureWalletView(discord.ui.View):
     def __init__(self, coin: str):
         super().__init__(timeout=300)
-
         self.coin = coin
 
     @discord.ui.button(
@@ -316,33 +325,24 @@ async def show_wallet(
     coin: str,
 ) -> None:
     try:
-        wallets = get_wallets(
-            interaction.user.id
-        )
-
+        wallets = get_wallets(interaction.user.id)
         address = wallets.get(coin)
 
     except Exception as exc:
-        print(
-            "Supabase read error:",
-            repr(exc),
-        )
+        print("Supabase read error:", repr(exc))
 
         await interaction.response.send_message(
             "❌ Database error. Check your Supabase configuration.",
             ephemeral=True,
         )
-
         return
 
     if not address:
         await interaction.response.send_message(
-            f"⚠️ You haven't configured your "
-            f"**{COINS[coin]}** address yet.",
+            f"⚠️ You haven't configured your **{COINS[coin]}** address yet.",
             view=ConfigureWalletView(coin),
             ephemeral=True,
         )
-
         return
 
     embed = discord.Embed(
@@ -354,9 +354,10 @@ async def show_wallet(
         text="Make sure the network is correct before sending funds."
     )
 
+    # PUBLIC: everyone in the channel can see the wallet address.
     await interaction.response.send_message(
         embed=embed,
-        ephemeral=True,
+        ephemeral=False,
     )
 
 
@@ -364,9 +365,7 @@ async def show_wallet(
 # DYNAMIC WALLET COMMANDS
 # ============================================================
 
-def make_wallet_callback(
-    coin: str,
-):
+def make_wallet_callback(coin: str):
     async def callback(
         interaction: discord.Interaction,
     ) -> None:
@@ -402,30 +401,12 @@ for coin in COINS:
 )
 @app_commands.choices(
     network=[
-        app_commands.Choice(
-            name="Bitcoin",
-            value="btc",
-        ),
-        app_commands.Choice(
-            name="Litecoin",
-            value="ltc",
-        ),
-        app_commands.Choice(
-            name="Ethereum",
-            value="eth",
-        ),
-        app_commands.Choice(
-            name="Solana",
-            value="sol",
-        ),
-        app_commands.Choice(
-            name="BNB Chain",
-            value="bnb",
-        ),
-        app_commands.Choice(
-            name="TRON",
-            value="trx",
-        ),
+        app_commands.Choice(name="Bitcoin", value="btc"),
+        app_commands.Choice(name="Litecoin", value="ltc"),
+        app_commands.Choice(name="Ethereum", value="eth"),
+        app_commands.Choice(name="Solana", value="sol"),
+        app_commands.Choice(name="BNB Chain", value="bnb"),
+        app_commands.Choice(name="TRON", value="trx"),
     ]
 )
 async def checktx(
@@ -433,21 +414,15 @@ async def checktx(
     txid: str,
     network: app_commands.Choice[str],
 ) -> None:
-    await interaction.response.defer(
-        ephemeral=True
-    )
+    await interaction.response.defer(ephemeral=False)
 
     txid = txid.strip()
 
-    if not re.fullmatch(
-        r"[A-Za-z0-9:_-]{20,300}",
-        txid,
-    ):
+    if not re.fullmatch(r"[A-Za-z0-9:_-]{20,300}", txid):
         await interaction.followup.send(
             "❌ That doesn't look like a valid transaction hash.",
-            ephemeral=True,
+            ephemeral=False,
         )
-
         return
 
     explorers = {
@@ -473,9 +448,10 @@ async def checktx(
         text="Live confirmation data requires an RPC/indexer."
     )
 
+    # PUBLIC: everyone can see the transaction result.
     await interaction.followup.send(
         embed=embed,
-        ephemeral=True,
+        ephemeral=False,
     )
 
 
@@ -495,13 +471,12 @@ async def upi(
         description="Use the payment information shown below.",
     )
 
-    embed.set_image(
-        url=UPI_IMAGE_URL
-    )
+    embed.set_image(url=UPI_IMAGE_URL)
 
+    # PUBLIC
     await interaction.response.send_message(
         embed=embed,
-        ephemeral=True,
+        ephemeral=False,
     )
 
 
@@ -521,19 +496,18 @@ async def calculate(
     expression: str,
 ) -> None:
     try:
-        result = safe_calculate(
-            expression
-        )
+        result = safe_calculate(expression)
 
+        # PUBLIC
         await interaction.response.send_message(
             f"🧮 `{expression}` = **{result}**",
-            ephemeral=True,
+            ephemeral=False,
         )
 
     except ValueError as exc:
         await interaction.response.send_message(
             f"❌ {exc}",
-            ephemeral=True,
+            ephemeral=False,
         )
 
 
@@ -549,30 +523,25 @@ async def info(
     interaction: discord.Interaction,
 ) -> None:
     try:
-        wallets = get_wallets(
-            interaction.user.id
-        )
+        wallets = get_wallets(interaction.user.id)
 
     except Exception as exc:
-        print(
-            "Supabase info error:",
-            repr(exc),
-        )
+        print("Supabase info error:", repr(exc))
 
         await interaction.response.send_message(
             "❌ Database error.",
-            ephemeral=True,
+            ephemeral=False,
         )
-
         return
 
     lines = []
 
     for coin, name in COINS.items():
-        if wallets.get(coin):
-            status = "✅ Configured"
-        else:
-            status = "❌ Not configured"
+        status = (
+            "✅ Configured"
+            if wallets.get(coin)
+            else "❌ Not configured"
+        )
 
         lines.append(
             f"**{name}:** {status}"
@@ -587,9 +556,10 @@ async def info(
         text="Use /<coin> to view or configure a wallet."
     )
 
+    # PUBLIC
     await interaction.response.send_message(
         embed=embed,
-        ephemeral=True,
+        ephemeral=False,
     )
 
 
@@ -607,47 +577,25 @@ async def help_command(
     embed = discord.Embed(
         title="🤖 Crypto Bot Help",
         description=(
-            "**/checktx <txid>** — "
-            "Check a transaction and open its explorer.\n\n"
-
-            "**/ltc** — "
-            "View or configure your Litecoin address.\n"
-
-            "**/btc** — "
-            "View or configure your Bitcoin address.\n"
-
-            "**/eth** — "
-            "View or configure your Ethereum address.\n"
-
-            "**/sol** — "
-            "View or configure your Solana address.\n"
-
-            "**/usdt** — "
-            "View or configure your USDT address.\n\n"
-
-            "**/bnb /xrp /doge /trx /ton /ada** — "
-            "Additional wallet commands.\n"
-
-            "**/dot /avax /matic /pol /link /shib** — "
-            "Additional wallet commands.\n\n"
-
-            "**/upi** — "
-            "Show UPI payment information.\n\n"
-
-            "**/calculate <expression>** — "
-            "Calculate basic arithmetic.\n\n"
-
-            "**/info** — "
-            "Show your wallet configuration.\n\n"
-
-            "**/help** — "
-            "Show this help menu."
+            "**/checktx <txid>** — Check a transaction and open its explorer.\n\n"
+            "**/ltc** — View or configure your Litecoin address.\n"
+            "**/btc** — View or configure your Bitcoin address.\n"
+            "**/eth** — View or configure your Ethereum address.\n"
+            "**/sol** — View or configure your Solana address.\n"
+            "**/usdt** — View or configure your USDT address.\n\n"
+            "**/bnb /xrp /doge /trx /ton /ada** — Additional wallet commands.\n"
+            "**/dot /avax /matic /pol /link /shib** — Additional wallet commands.\n\n"
+            "**/upi** — Show UPI payment information.\n"
+            "**/calculate <expression>** — Calculate basic arithmetic.\n"
+            "**/info** — Show your wallet configuration.\n"
+            "**/help** — Show this help menu."
         ),
     )
 
+    # PUBLIC
     await interaction.response.send_message(
         embed=embed,
-        ephemeral=True,
+        ephemeral=False,
     )
 
 
@@ -658,10 +606,7 @@ async def help_command(
 @bot.event
 async def on_ready() -> None:
     print("=" * 60)
-    print(
-        f"Logged in as: {bot.user} "
-        f"({bot.user.id})"
-    )
+    print(f"Logged in as: {bot.user} ({bot.user.id})")
 
     try:
         synced = await bot.tree.sync()
@@ -701,28 +646,31 @@ async def on_disconnect() -> None:
 
 
 # ============================================================
-# START BOT
+# START
 # ============================================================
 
-print(
-    "Starting Crypto Discord Bot..."
-)
-
+print("Starting Crypto Discord Bot...")
 print(
     "Python version:",
     os.sys.version.split()[0],
 )
 
+# Start Render's HTTP health server first.
+web_thread = threading.Thread(
+    target=run_web_server,
+    daemon=True,
+)
+
+web_thread.start()
+
 try:
-    bot.run(
-        DISCORD_TOKEN
-    )
+    bot.run(DISCORD_TOKEN)
 
 except discord.LoginFailure as exc:
     raise RuntimeError(
         "Discord rejected DISCORD_TOKEN. "
-        "Make sure the Render variable contains the "
-        "Bot Token for this exact Discord application."
+        "Make sure the Render variable contains the Bot Token "
+        "for this exact Discord application."
     ) from exc
 
 except Exception as exc:
